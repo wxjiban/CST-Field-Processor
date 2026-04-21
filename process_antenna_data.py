@@ -251,15 +251,176 @@ def process_antenna_data(txt_file):
     return output_dir
 
 
+def detect_data_format(txt_file):
+    with open(txt_file, "r") as f:
+        header = f.readline()
+    columns = header.split()
+    if "z" in header.lower() and len(columns) >= 9:
+        return "3d"
+    return "2d"
+
+
+def get_unique_z_values(txt_file):
+    result_all = dh_list(txt_file)
+    z_values = []
+    seen = set()
+    for row in result_all:
+        z = float(row[2])
+        if z not in seen:
+            seen.add(z)
+            z_values.append(z)
+    return z_values
+
+
+def process_antenna_data_3d(txt_file, z_coords=None):
+    txt_filename = os.path.basename(txt_file)
+    data_name = os.path.splitext(txt_filename)[0]
+    output_dir = data_name + "_data"
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"已创建文件夹: {output_dir}")
+
+    unit = detect_unit(txt_file)
+    print(f"检测到单位: {unit}")
+
+    result_all = dh_list(txt_file)
+
+    z_values_in_data = get_unique_z_values(txt_file)
+    print(f"数据中包含的z坐标: {z_values_in_data}")
+
+    if z_coords is None:
+        z_coords = z_values_in_data
+    else:
+        z_coords = [float(z) for z in z_coords]
+
+    n = 1
+    for i in range(1, len(result_all)):
+        if result_all[i][1] == result_all[0][1] and result_all[i][2] == result_all[0][2]:
+            n += 1
+        else:
+            break
+
+    total = len(result_all)
+    n_points_per_plane = n * n
+    print(f"总数据点: {total}, 网格大小: {n}x{n}, z平面数: {len(z_values_in_data)}")
+
+    for z_target in z_coords:
+        z_matched = None
+        for z_val in z_values_in_data:
+            if abs(z_val - z_target) < 1e-6:
+                z_matched = z_val
+                break
+
+        if z_matched is None:
+            print(f"警告: 未找到z={z_target}的数据，跳过")
+            continue
+
+        z_suffix = f"z{z_matched:.4f}".replace(".", "p").replace("-", "m")
+        z_output_dir = os.path.join(output_dir, z_suffix)
+        if not os.path.exists(z_output_dir):
+            os.makedirs(z_output_dir)
+
+        z_data = []
+        for row in result_all:
+            if abs(float(row[2]) - z_matched) < 1e-6:
+                z_data.append(row)
+
+        if len(z_data) != n * n:
+            print(f"警告: z={z_matched}的数据点数({len(z_data)})不等于{n*n}，跳过")
+            continue
+
+        x = np.array([float(z_data[i][0]) for i in range(n)])
+        y = np.array([float(z_data[i * n][1]) for i in range(n)])
+
+        if unit == "in":
+            x_display = x * 25.4
+            y_display = y * 25.4
+        else:
+            x_display = x
+            y_display = y
+
+        matrix_mag_left = circular_matrix(z_data, n, cir_status="left", matrix_type="mag")
+        matrix_phase_left = circular_matrix(z_data, n, cir_status="left", matrix_type="phase")
+        matrix_mag_right = circular_matrix(z_data, n, cir_status="right", matrix_type="mag")
+        matrix_phase_right = circular_matrix(z_data, n, cir_status="right", matrix_type="phase")
+
+        data_files = {
+            "Left_circular_Magnitude": matrix_mag_left,
+            "Left_circular_Phase": matrix_phase_left,
+            "Right_circular_Magnitude": matrix_mag_right,
+            "Right_circular_Phase": matrix_phase_right,
+        }
+
+        for name, matrix in data_files.items():
+            df_mm = pd.DataFrame(
+                matrix,
+                index=[f"{yi:.2f}mm" for yi in y_display],
+                columns=[f"{xi:.2f}mm" for xi in x_display],
+            )
+            df_mm.to_csv(os.path.join(z_output_dir, f"{name}_mm.csv"))
+
+            df_nopos = pd.DataFrame(matrix)
+            df_nopos.to_csv(os.path.join(z_output_dir, f"{name}_nopos.csv"))
+
+        plot_heat(
+            matrix_mag_left,
+            x_display,
+            y_display,
+            title=f"Left-circular Magnitude (z={z_matched:.2f}mm)",
+            plot_type="mag",
+            save_path=os.path.join(z_output_dir, "Left_circular_Magnitude.jpg"),
+        )
+        plot_heat(
+            matrix_phase_left,
+            x_display,
+            y_display,
+            title=f"Left-circular Phase (z={z_matched:.2f}mm)",
+            plot_type="phase",
+            save_path=os.path.join(z_output_dir, "Left_circular_Phase.jpg"),
+        )
+        plot_heat(
+            matrix_mag_right,
+            x_display,
+            y_display,
+            title=f"Right-circular Magnitude (z={z_matched:.2f}mm)",
+            plot_type="mag",
+            save_path=os.path.join(z_output_dir, "Right_circular_Magnitude.jpg"),
+        )
+        plot_heat(
+            matrix_phase_right,
+            x_display,
+            y_display,
+            title=f"Right-circular Phase (z={z_matched:.2f}mm)",
+            plot_type="phase",
+            save_path=os.path.join(z_output_dir, "Right_circular_Phase.jpg"),
+        )
+
+        print(f"z={z_matched:.2f}mm 处理完成！文件保存在: {z_output_dir}/")
+
+    print(f"\n所有z平面处理完成！")
+    return output_dir
+
+
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    txt_files = [
-        # "20260416_hex_180_metasurface_center_colli_z-5.txt",
-        # "20260416_hex_180_metasurface_center_colli_z100.txt",
-        "20260416_hex_360_metasurface_center_colli_z150.txt"
+
+    txt_files_3d = [
+        "260420_hex_300_ariy_theory_efield.txt",
     ]
-    for txt_file in txt_files:
+
+    z_coords_to_process = [
+        50.8926, 101.856, 152.82,
+    ]
+
+    for txt_file in txt_files_3d:   
         if os.path.exists(txt_file):
-            process_antenna_data(txt_file)
+            fmt = detect_data_format(txt_file)
+            if fmt == "3d":
+                print(f"\n=== 处理3D数据: {txt_file} ===")
+                process_antenna_data_3d(txt_file, z_coords=z_coords_to_process if z_coords_to_process else None)
+            else:
+                print(f"\n=== 处理2D数据: {txt_file} ===")
+                process_antenna_data(txt_file)
         else:
             print(f"文件不存在: {txt_file}")
