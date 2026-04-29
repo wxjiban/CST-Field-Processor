@@ -156,7 +156,3 @@ CST-Field-Processor/
 ```
 
 ---
-
-## 许可证 / License
-
-MIT License
